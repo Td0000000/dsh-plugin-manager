@@ -1,0 +1,4 @@
+- insert:
+    - id: td-plugin-manager
+      name: 'dsh-plugin-manager'
+      disabled: !!js "[...ctx.loader.entries()].some((e) => e.options.name === 'dsh-plugin-manager' && e.options.id !== 'td-plugin-manager' && !e.disabled)"
