@@ -3,14 +3,14 @@
 DeepSeek Harness (DSH) 设置页插件管理独立插件（含自由浮动的像素吉祥物快捷控制面板）。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![DSH Compatibility](https://img.shields.io/badge/DSH-0.1.x%20%7C%20%3E%3D0.1.2--rc.1-brightgreen.svg)](https://github.com/deepseek-ai/deepseek-harness)
+[![DSH Compatibility](https://img.shields.io/badge/DSH-0.1.x%20%20%7C%20%3E%3D0.1.2--rc.1%20(%3C0.2.0)-brightgreen.svg)](https://github.com/deepseek-ai/deepseek-harness)
 [![Cordis Compatibility](https://img.shields.io/badge/Cordis-%5E4.0.2-orange.svg)](https://github.com/deepseek-ai/cordis)
 
 ---
 
 ## 适配版本说明
 
-- **DeepSeek Harness (DSH)**：适配 `0.1.x` 系列（包括 `0.1.2-rc.1` 及更高版本主干开发分支）。
+- **DeepSeek Harness (DSH)**：适配 `0.1.x` 系列，**已验证安装于 `0.1.5-rc.1`（内置 `@deepseek-ai/cordis@4.0.2`，与本插件 peer 依赖完全一致，无需额外适配）。
 - **微内核架构**：基于 `@deepseek-ai/cordis` `^4.0.2` 插件生命周期、Cordis Loader 与配置 Patch 机制。
 - **环境要求**：Node.js `>= 20.0.0`，pnpm `>= 9.0.0`，React `>= 18.0.0`。
 

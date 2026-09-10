@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-manager",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "DSH plugin manager for managing, grouping, toggling, and uninstalling plugins in settings",
   "type": "module",
   "publishConfig": {
