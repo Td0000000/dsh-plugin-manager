@@ -5,8 +5,8 @@
  * and handles plugin uninstallation.
  */
 
-import { existsSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readFileSync, writeFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -60,22 +60,75 @@ export function isSystemPlugin(nameOrId: string): boolean {
   return PROTECTED_PATTERNS.some((re) => re.test(nameOrId))
 }
 
+/**
+ * Resolve the profile this plugin manages.
+ *
+ * DSH 0.1.x was launched with `--profile <name>`, so the original probe read
+ * that flag and otherwise assumed `web`. The 0.2.x launchers (including the
+ * Electron Desktop Host) instead pass the profile **directory** positionally
+ * (`<dshRoot> <profileDir> <runtimeDir> <pnpm> <bin>`), so the old default sent
+ * every read and write to a non-existent `profiles/web` directory. Accept the
+ * explicit argument, the `--profile` flag, a positional `…/profiles/<name>`
+ * path, `DSH_PROFILE`, then fall back to the only installed profile.
+ */
 export function resolveProfileDir(customProfile?: string): { profile: string; dir: string } {
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
-  let profile = customProfile
-  if (!profile) {
-    const argv = process.argv
-    const idx = argv.indexOf('--profile')
-    if (idx !== -1 && idx + 1 < argv.length) {
-      const val = argv[idx + 1]
-      if (val && !val.startsWith('-')) {
-        profile = val
-      }
+  const profilesRoot = join(dshHome, 'profiles')
+
+  /** Recognize an absolute/relative directory whose parent directory is `profiles`. */
+  const fromProfileDir = (candidate: string): { profile: string; dir: string } | undefined => {
+    let resolved: string
+    try {
+      resolved = resolve(candidate)
+      if (!existsSync(resolved) || !statSync(resolved).isDirectory()) return undefined
+    } catch {
+      return undefined
+    }
+    if (basename(dirname(resolved)).toLowerCase() !== 'profiles') return undefined
+    const profile = basename(resolved)
+    if (!profile || profile === '.' || profile === '..') return undefined
+    return { profile, dir: resolved }
+  }
+
+  if (customProfile) {
+    return fromProfileDir(customProfile) ?? { profile: customProfile, dir: join(profilesRoot, customProfile) }
+  }
+
+  const argv = process.argv
+
+  // `dsh --profile <name>` (CLI launched profiles).
+  const idx = argv.indexOf('--profile')
+  if (idx !== -1 && idx + 1 < argv.length) {
+    const val = argv[idx + 1]
+    if (val && !val.startsWith('-')) {
+      return fromProfileDir(val) ?? { profile: val, dir: join(profilesRoot, val) }
     }
   }
-  profile = profile || 'web'
-  const dir = join(dshHome, 'profiles', profile)
-  return { profile, dir }
+
+  // DSH 0.2 Host launchers pass the profile directory among the positional args.
+  for (const arg of argv) {
+    if (!arg || arg.startsWith('-')) continue
+    const hit = fromProfileDir(arg)
+    if (hit) return hit
+  }
+
+  const envProfile = process.env.DSH_PROFILE
+  if (envProfile) {
+    return fromProfileDir(envProfile) ?? { profile: envProfile, dir: join(profilesRoot, envProfile) }
+  }
+
+  // No explicit signal: use the only installed profile, preferring shipped names.
+  try {
+    const names = readdirSync(profilesRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+      .map((entry) => entry.name)
+    if (names.length === 1) return { profile: names[0], dir: join(profilesRoot, names[0]) }
+    for (const preferred of ['desktop', 'web']) {
+      if (names.includes(preferred)) return { profile: preferred, dir: join(profilesRoot, preferred) }
+    }
+  } catch {}
+
+  return { profile: 'web', dir: join(profilesRoot, 'web') }
 }
 
 function getGroupsFilePath(profileDir: string): string {

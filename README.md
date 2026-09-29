@@ -3,16 +3,24 @@
 DeepSeek Harness (DSH) 设置页插件管理独立插件（含自由浮动的像素吉祥物快捷控制面板）。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![DSH Compatibility](https://img.shields.io/badge/DSH-0.1.x%20%20%7C%20%3E%3D0.1.2--rc.1%20(%3C0.2.0)-brightgreen.svg)](https://github.com/deepseek-ai/deepseek-harness)
+[![DSH Compatibility](https://img.shields.io/badge/DSH-0.2.x%20%3E%3D0.2.0--rc.1%20(%3C0.3.0)-brightgreen.svg)](https://github.com/deepseek-ai/deepseek-harness)
 [![Cordis Compatibility](https://img.shields.io/badge/Cordis-%5E4.0.2-orange.svg)](https://github.com/deepseek-ai/cordis)
 
 ---
 
 ## 适配版本说明
 
-- **DeepSeek Harness (DSH)**：适配 `0.1.x` 系列，**已验证安装于 `0.1.5-rc.1`（内置 `@deepseek-ai/cordis@4.0.2`，与本插件 peer 依赖完全一致，无需额外适配）。
-- **微内核架构**：基于 `@deepseek-ai/cordis` `^4.0.2` 插件生命周期、Cordis Loader 与配置 Patch 机制。
+- **DeepSeek Harness (DSH)**：适配 `0.2.x` 系列，**已在 `0.2.0-rc.2`（内置 `@deepseek-ai/cordis@4.0.4`）实机验证安装**：宿主条目正常挂载、客户端 bundle 正常注入 `__DSH_BOOT__`、设置页与浮动面板 API 全部可用。
+- **微内核架构**：基于 `@deepseek-ai/cordis` 插件生命周期、Cordis Loader 与配置 Patch 机制。
 - **环境要求**：Node.js `>= 20.0.0`，pnpm `>= 9.0.0`，React `>= 18.0.0`。
+
+### 从 1.0.1 到 1.0.2 的适配改动
+
+| 问题 | 说明 | 处理 |
+| --- | --- | --- |
+| 档案（Profile）定位错误 | `0.1.x` 通过 `--profile <name>` 启动；`0.2.x`（含 Electron Desktop Host）改为**位置参数**传入档案目录（`<dshRoot> <profileDir> <runtimeDir> <pnpm> <bin>`），旧代码因此回退到并不存在的 `profiles/web`，导致插件列表为空、启停写错目录 | `resolveProfileDir()` 依次识别：显式路径 → `--profile` → argv 中 `…/profiles/<name>` 位置参数 → `DSH_PROFILE` → 唯一已安装档案 |
+| 引擎声明过期 | `dsh.plugin.json` 声明 `engines.dsh: >=0.1.2-rc.1 <0.2.0`，把当前版本挡在范围外 | 更新为 `>=0.2.0-rc.1 <0.3.0` |
+| 语言探测失效 | `0.2.x` 的语言服务暴露 `getLocale()`，旧代码只探测 `get()` / `current` | 优先读 `getLocale()`，并兼容 `{ active }` 结构 |
 
 > ⚠️ **重要说明（当前阶段安装注意）**：
 > 目前 DeepSeek Harness 官方框架尚处于快速迭代与演进中，**尚未面向公共 npm 仓库打包编译发布全局预发版**。
@@ -30,16 +38,16 @@ DeepSeek Harness (DSH) 设置页插件管理独立插件（含自由浮动的像
 
 1. 本地插件路径：/你的本地路径/dsh-plugin-manager（请替换为实际绝对路径）
 2. 请进入该插件目录执行 `pnpm install` 与 `pnpm run build`，确保已完成编译构建出 lib 产物；
-3. 请定位当前使用的 DSH Profile 目录（如 `~/.dsh/profiles/web/` 或项目根目录下的 profiles/web）：
-   - 在其 `package.json` 的 `dependencies` 中添加："dsh-plugin-manager": "link:/你的本地路径/dsh-plugin-manager"
-   - 在其 `cordis.patch.yml` 中添加插件声明并启用：
-     ```yaml
-     dsh-plugin-manager:
-       $if: true
-     ```
-4. 在 Profile 目录下执行 `pnpm install`，并触发 DSH 热重载或重启 DSH Web 服务；
-5. 刷新浏览器页面，检查设置页中是否已出现「插件管理」面板，且右下角是否已显示像素吉祥物浮动小部件。
+3. 请定位当前使用的 DSH Profile 目录（DSH 0.2.x 位于 `~/.dsh/profiles/<档案名>/`，例如 `desktop`、`web`）：
+   - 把构建产物复制到 `~/.dsh/plugins/dsh-plugin-manager`；
+   - 在其 `package.json` 的 `dependencies` 中添加："dsh-plugin-manager": "link:C:/Users/你的用户名/.dsh/plugins/dsh-plugin-manager"；
+   - 在其 `package.json` 的 `dsh.profile.bundles` 数组**末尾**追加："dsh-plugin-manager"；
+     （该 bundle 自带的 `cordis.patch.yml` 会自动插入并启用 Loader 条目，**无需**手写 patch）
+4. 在 Profile 目录下执行 `pnpm install`，并触发 DSH 热重载或重启 DSH；
+5. 刷新浏览器页面，检查「设置 → 插件 → 插件管理」是否已出现面板，且右下角是否已显示像素吉祥物浮动小部件。
 ```
+
+> 提示：如果 DSH 已启用 HMR，第 3、4 步完成后宿主会**热重组**并立即挂载，无需重启进程。
 
 ---
 
@@ -57,30 +65,45 @@ pnpm install
 pnpm run build
 ```
 
-### 第二步：在 DSH Profile 中配置本地软链接
+### 第二步：把构建产物接入 DSH Profile（0.2.x）
 
-进入您的 DSH 配置目录（通常为 `~/.dsh/profiles/web/` 或 DSH 源码目录中的对应 profile）：
+进入您的 DSH 配置目录（DSH 0.2.x 为 `~/.dsh/profiles/<档案名>/`，例如 `desktop`、`web`）：
 
-1. **编辑 `package.json`**，在 `dependencies` 中引入本地路径：
+1. **复制构建产物到插件目录**：
+   ```bash
+   mkdir -p ~/.dsh/plugins/dsh-plugin-manager
+   cp -r lib cordis.patch.yml dsh.plugin.json package.json README.md LICENSE ~/.dsh/plugins/dsh-plugin-manager/
+   ```
+
+2. **编辑 Profile 的 `package.json`**，在 `dependencies` 中引入本地路径，并把包名加入 `dsh.profile.bundles`：
    ```json
    {
      "dependencies": {
-       "dsh-plugin-manager": "link:/绝对路径/dsh-plugin-manager"
+       "dsh-plugin-manager": "link:C:/Users/你的用户名/.dsh/plugins/dsh-plugin-manager"
+     },
+     "dsh": {
+       "profile": {
+         "bundles": [
+           "@deepseek-ai/dsh-base",
+           "@deepseek-ai/dsh-web-app",
+           "dsh-plugin-manager"
+         ]
+       }
      }
    }
    ```
+   > `dsh.profile.bundles` 决定加载顺序，请**追加到末尾**，以免改变已有 bundle 的配置优先级。
 
-2. **编辑 `cordis.patch.yml`**（或 `cordis.yml`），启用该插件：
-   ```yaml
-   dsh-plugin-manager:
-     $if: true
-   ```
+3. **无需手写 `cordis.patch.yml`**：本插件的 `dsh.bundle.patch`（`cordis.patch.yml`）会在组合阶段自动 `insert` 出 `td-plugin-manager` 条目并启用它。仅当需要覆盖配置时，才在 Profile 的 `cordis.patch.yml` 中按 `id: td-plugin-manager` 追加 patch。
 
-3. **安装依赖并刷新页面**：
+4. **安装依赖并刷新页面**：
    ```bash
    pnpm install
    ```
-   刷新浏览器页面，即可在设置页中看到「插件管理」，并在页面右下角看到浮动吉祥物。
+
+> 也可以直接使用 DSH 内置的插件管理器安装：`plugin_manager install_bundle`，target 传本地插件目录绝对路径即可，宿主会自动完成依赖写入、bundle 选择与热重组。
+
+完成后刷新浏览器页面，即可在「设置 → 插件 → 插件管理」中看到管理面板，并在页面右下角看到浮动吉祥物。
 
 ---
 
