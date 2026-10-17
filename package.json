@@ -1,7 +1,8 @@
 {
   "name": "dsh-plugin-manager",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "DSH plugin manager for managing, grouping, toggling, and uninstalling plugins in settings",
+  "icon": "./icon.svg",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -14,10 +15,12 @@
       "default": "./lib/index.js"
     },
     "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "dsh": ">=0.2.0-rc.1 <0.3.0"
   },
   "scripts": {
     "build": "node -e \"fs.rmSync('lib', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && tsdown"
@@ -45,6 +48,7 @@
     "typescript": "^5.7.3"
   },
   "dsh": {
+    "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
@@ -62,6 +66,8 @@
     "lib",
     "cordis.patch.yml",
     "dsh.plugin.json",
+    "locale",
+    "icon.svg",
     "README.md",
     "LICENSE"
   ]

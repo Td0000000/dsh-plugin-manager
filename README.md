@@ -3,29 +3,51 @@
 DeepSeek Harness (DSH) 设置页插件管理独立插件（含自由浮动的像素吉祥物快捷控制面板）。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![DSH Compatibility](https://img.shields.io/badge/DSH-0.2.x%20%3E%3D0.2.0--rc.1%20(%3C0.3.0)-brightgreen.svg)](https://github.com/deepseek-ai/deepseek-harness)
+[![DSH Compatibility](https://img.shields.io/badge/DSH-0.2.1--rc.2%20(%3E%3D0.2.0--rc.1%20%3C0.3.0)-brightgreen.svg)](https://github.com/deepseek-ai/deepseek-harness)
 [![Cordis Compatibility](https://img.shields.io/badge/Cordis-%5E4.0.2-orange.svg)](https://github.com/deepseek-ai/cordis)
 
 ---
 
 ## 适配版本说明
 
-- **DeepSeek Harness (DSH)**：适配 `0.2.x` 系列，**已在 `0.2.0-rc.2`（内置 `@deepseek-ai/cordis@4.0.4`）实机验证安装**：宿主条目正常挂载、客户端 bundle 正常注入 `__DSH_BOOT__`、设置页与浮动面板 API 全部可用。
+- **DeepSeek Harness (DSH)**：适配 `0.2.x` 系列，**已在 `0.2.1-rc.2`（内置 `@deepseek-ai/cordis@4.0.5`）实机验证**：宿主条目正常挂载、客户端 bundle 正常注入 `__DSH_BOOT__`、设置页与浮动面板 API 全部可用，包根 `icon.svg` 与 `locale/en.json`、`locale/zh.json` 可被官方插件列表/设置页读取为中文标题与图标。
 - **微内核架构**：基于 `@deepseek-ai/cordis` 插件生命周期、Cordis Loader 与配置 Patch 机制。
 - **环境要求**：Node.js `>= 20.0.0`，pnpm `>= 9.0.0`，React `>= 18.0.0`。
 
-### 从 1.0.1 到 1.0.2 的适配改动
+### 从 1.0.2 到 1.1.0 的适配改动
 
 | 问题 | 说明 | 处理 |
 | --- | --- | --- |
-| 档案（Profile）定位错误 | `0.1.x` 通过 `--profile <name>` 启动；`0.2.x`（含 Electron Desktop Host）改为**位置参数**传入档案目录（`<dshRoot> <profileDir> <runtimeDir> <pnpm> <bin>`），旧代码因此回退到并不存在的 `profiles/web`，导致插件列表为空、启停写错目录 | `resolveProfileDir()` 依次识别：显式路径 → `--profile` → argv 中 `…/profiles/<name>` 位置参数 → `DSH_PROFILE` → 唯一已安装档案 |
-| 引擎声明过期 | `dsh.plugin.json` 声明 `engines.dsh: >=0.1.2-rc.1 <0.2.0`，把当前版本挡在范围外 | 更新为 `>=0.2.0-rc.1 <0.3.0` |
-| 语言探测失效 | `0.2.x` 的语言服务暴露 `getLocale()`，旧代码只探测 `get()` / `current` | 优先读 `getLocale()`，并兼容 `{ active }` 结构 |
+| 缺少 DSH 版本声明 | `0.2.1` 的插件兼容性检查读取**包根 `package.json`** 的 `engines.dsh`（缺失时回退 `peerDependencies` 中的 `@deepseek-ai/dsh*`），且裁剪版 `dsh.plugin.json` 不再参与读取 | `package.json` 增加 `engines.dsh: ">=0.2.0-rc.1 <0.3.0"`，并声明 `dsh.manifestVersion: 1`；`dsh.plugin.json` 同步为 1.1.0 |
+| 缺少显示元数据 | `0.2.1` 通过 `readPluginMeta()` 读取包根 `icon` 字段 + `locale/*.json` 的 `meta.title/meta.description`（经 `exports` 解析） | 新增 `icon.svg`、`locale/en.json`、`locale/zh.json`，`package.json` 增加 `"icon": "./icon.svg"`、`exports["./locale/*.json"]`、`files: ["locale","icon.svg"]` |
+| 写 Profile patch 会整文件重排 | 旧实现用 `parse` + `stringify` 重写 `cordis.patch.yml`，会丢失注释、键顺序、其他条目和 `!!js` 表达式 | 改用 YAML `parseDocument` **AST 局部编辑**：只改目标条目的 `disabled`（启用时删除纯开关项或仅移除 `disabled`），其余内容与 `!!js` 原样保留；写文件改为临时文件 + rename 原子替换；文件无法解析时报错并**保留原文件**，绝不覆盖 |
+| 改 Profile `package.json` 格式漂移 | 卸载时整文件 `JSON.stringify(..., 2)` 重写 | 仅删除目标 `dependencies` 项与 `dsh.profile.bundles` 项，保留全部其他依赖/bundle/未知字段、原缩进与结尾换行；无法解析时不覆盖 |
+| 与官方插件管理器双写 | `0.2.1` 新增官方 `pluginManager` 服务（`setPluginEnabled`/`removeBundle` 等）并自带插件 UI，双方各写 profile 会产生状态漂移 | 运行时检测 `ctx.get("pluginManager")`：**启停/卸载优先走官方服务**（拿到 `applied`/`restart-required`/`overridden` 即成功），服务缺失、条目只读或调用失败时**自动回退**到本地 patch 通路，并在响应 `warnings` 中说明 |
+| 插件列表无兼容状态 | 只能看到版本号 | 列表项增加 `engines.dsh` 与官方判定结果：设置页显示「DSH 兼容 / DSH 不兼容 / 需 DSH …」徽标，顶部提示当前走官方服务还是本地 patch |
 
 > ⚠️ **重要说明（当前阶段安装注意）**：
 > 目前 DeepSeek Harness 官方框架尚处于快速迭代与演进中，**尚未面向公共 npm 仓库打包编译发布全局预发版**。
 > 因此，用户无法通过常规远程网络命令直接开箱即用。
 > **当前使用方式**：必须将本插件仓库代码**克隆/拉取到本地**，然后**让本地 AI（Pi / Claude Code / Cursor / Windsurf / DSH 内置 Coding Agent）帮您完成装载**，或通过本地 Link 方式引入。
+
+---
+
+## 与 DSH 0.2.1 内置插件管理的共存说明
+
+DSH `0.2.1` 起，官方在 Host 层提供 `pluginManager` 服务与内置「插件」设置页，两者与本插件操作的是**同一份 profile 状态**（Profile `package.json` 的 `dsh.profile.bundles` + `cordis.patch.yml`，以及 `compatibility.json` 版本豁免记录）。
+
+**本插件的策略**
+
+1. **优先官方通路**：检测到 `pluginManager` 服务时，单插件启停交给 `setPluginEnabled(entryId, enabled)`，卸载交给 `removeBundle(name)`；官方服务会同时驱动 Loader 生命周期并维护兼容性/豁免状态，避免双写。
+2. **自动回退**：官方服务不存在（如 `0.2.0`）、条目 `readOnlyReason` 非空、服务抛错或返回 `failed` 时，回退到本插件原有的 profile patch 编辑，并在接口 `warnings` 中写明原因。
+3. **绝不争抢官方独占文件**：本插件不写 `compatibility.json`，不写 `pnpm-lock.yaml`，不整文件重写 profile `package.json`；卸载回退时仅移除目标项并尽力调用 `pnpm remove`。
+4. **两套 UI 可同时使用**：分组成员是**本插件私有**的元数据（`td-plugin-groups.json`），官方 UI 不感知；插件启停/安装状态以 profile 文件为唯一事实源，两个界面在刷新后一致。
+
+**使用建议**
+
+- 安装/卸载插件（尤其需要走 pnpm、GitHub、版本豁免）优先用官方插件管理器或 `plugin_manager` 工具；本插件更适合**分组归类、批量启停和浮动面板快捷操作**。
+- 若同时打开两个面板：一边改变状态后，另一边等下一次轮询（本插件设置页 2.5 秒轮询/窗口聚焦刷新）或手动刷新即可，不要在两边同时点同一个插件。
+- 启用本插件自身（`dsh-plugin-manager`）时，官方 UI 与本插件都会看到 `td-plugin-manager` 条目；两者写的是同一个启停 patch，结果等价。
 
 ---
 
@@ -39,7 +61,7 @@ DeepSeek Harness (DSH) 设置页插件管理独立插件（含自由浮动的像
 1. 本地插件路径：/你的本地路径/dsh-plugin-manager（请替换为实际绝对路径）
 2. 请进入该插件目录执行 `pnpm install` 与 `pnpm run build`，确保已完成编译构建出 lib 产物；
 3. 请定位当前使用的 DSH Profile 目录（DSH 0.2.x 位于 `~/.dsh/profiles/<档案名>/`，例如 `desktop`、`web`）：
-   - 把构建产物复制到 `~/.dsh/plugins/dsh-plugin-manager`；
+   - 把构建产物复制到 `~/.dsh/plugins/dsh-plugin-manager`（含 `lib/`、`package.json`、`cordis.patch.yml`、`dsh.plugin.json`、`icon.svg`、`locale/`）；
    - 在其 `package.json` 的 `dependencies` 中添加："dsh-plugin-manager": "link:C:/Users/你的用户名/.dsh/plugins/dsh-plugin-manager"；
    - 在其 `package.json` 的 `dsh.profile.bundles` 数组**末尾**追加："dsh-plugin-manager"；
      （该 bundle 自带的 `cordis.patch.yml` 会自动插入并启用 Loader 条目，**无需**手写 patch）
@@ -72,7 +94,7 @@ pnpm run build
 1. **复制构建产物到插件目录**：
    ```bash
    mkdir -p ~/.dsh/plugins/dsh-plugin-manager
-   cp -r lib cordis.patch.yml dsh.plugin.json package.json README.md LICENSE ~/.dsh/plugins/dsh-plugin-manager/
+   cp -r lib cordis.patch.yml dsh.plugin.json package.json README.md LICENSE icon.svg locale ~/.dsh/plugins/dsh-plugin-manager/
    ```
 
 2. **编辑 Profile 的 `package.json`**，在 `dependencies` 中引入本地路径，并把包名加入 `dsh.profile.bundles`：
@@ -101,7 +123,7 @@ pnpm run build
    pnpm install
    ```
 
-> 也可以直接使用 DSH 内置的插件管理器安装：`plugin_manager install_bundle`，target 传本地插件目录绝对路径即可，宿主会自动完成依赖写入、bundle 选择与热重组。
+> 也可以直接使用 DSH 内置的插件管理器安装：`plugin_manager install_bundle`，target 传本地插件目录绝对路径即可，宿主会自动完成依赖写入、bundle 选择与热重组（`0.2.1` 起会校验 `engines.dsh` 并维护 `compatibility.json`）。
 
 完成后刷新浏览器页面，即可在「设置 → 插件 → 插件管理」中看到管理面板，并在页面右下角看到浮动吉祥物。
 
@@ -184,14 +206,20 @@ pnpm run build
 ```bash
 # 1. 安装项目依赖
 pnpm install
+# 或：npm install
 
 # 2. 编译 TypeScript 与打包 Web 客户端
 pnpm run build
+# 或：npm run build
 ```
 
 产物解析：
-- `lib/index.js`：Cordis 后端核心服务，提供插件扫描、YAML Patch 修改、分组数据管理与文件清理等 RESTful/RPC 接口。
+- `lib/index.js`：Cordis 后端核心服务，提供插件扫描、YAML Patch 修改、分组数据管理与文件清理等 RESTful/RPC 接口；`0.2.1` 下优先委托官方 `pluginManager`。
 - `lib/client.js`：包含前端 React 设置页主面板与全局注入的像素吉祥物浮动组件（`FloatingPluginManager`）。
+- `lib/client-registry.js`：`dsh-external/dsh-plugin-manager` 客户端注册产物（`dsh.plugin.json` 的 `client.main`）。
+- `lib/types/index.d.ts`：后端 TypeScript 类型声明。
+
+包根 `icon.svg` 与 `locale/en.json`、`locale/zh.json` 参与 DSH `0.2.1` 的插件显示元数据读取（`meta.title` / `meta.description`，英文为兜底语言），构建/发布时需一并同步到安装目录。
 
 ---
 

@@ -5,12 +5,13 @@
  * and handles plugin uninstallation.
  */
 
-import { existsSync, readFileSync, writeFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
+import { isMap, isScalar, isSeq, parseDocument, parse as parseYaml, stringify as stringifyYaml } from 'yaml'
+import type { YAMLMap, YAMLSeq } from 'yaml'
 
 export interface Context {
   webServer: {
@@ -43,6 +44,13 @@ export interface PluginInfo {
   disabled: boolean
   system: boolean
   removable: boolean
+  /** `engines.dsh` declared by the plugin package, when it declares one. */
+  enginesDsh?: string
+  /**
+   * Whether the running DSH version accepts `engines.dsh`: `true`/`false` when
+   * the official plugin manager could answer, `null` when unknown.
+   */
+  compatible?: boolean | null
 }
 
 export interface PluginGroupsData {
@@ -176,7 +184,7 @@ export function readPatchYaml(profileDir: string): PatchEntry[] {
   }
   try {
     const raw = readFileSync(patchFile, 'utf-8')
-    const parsed = parseYaml(raw)
+    const parsed = parseYaml(raw, { customTags: [JS_TAG] })
     return Array.isArray(parsed) ? (parsed as PatchEntry[]) : []
   } catch {
     return []
@@ -188,6 +196,210 @@ export function writePatchYaml(profileDir: string, patches: PatchEntry[]): void 
   const yamlStr = stringifyYaml(patches)
   writeFileSync(patchFile, yamlStr, 'utf-8')
 }
+
+/**
+ * `!!js` is the Loader's expression tag. Declaring it as a known string tag
+ * keeps `parseDocument` quiet and lets the Document round-trip the tag instead
+ * of folding or re-quoting the expression.
+ */
+const JS_TAG = { tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }
+
+type PatchDocument = ReturnType<typeof parseDocument>
+
+function writeFileAtomic(file: string, content: string): void {
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`
+  writeFileSync(tmp, content, 'utf-8')
+  renameSync(tmp, file)
+}
+
+/**
+ * Load the profile patch as a YAML Document so edits stay local: comments,
+ * unrelated entries, key order, and `!!js` tags are preserved instead of being
+ * rebuilt by a whole-file `stringify`. Returns an error instead of silently
+ * replacing a file we could not understand.
+ */
+function loadPatchDocument(profileDir: string): { doc: PatchDocument } | { error: string } {
+  const patchFile = getPatchFilePath(profileDir)
+  let raw = '[]\n'
+  if (existsSync(patchFile)) {
+    raw = readFileSync(patchFile, 'utf-8')
+  }
+  const doc = parseDocument(raw, { customTags: [JS_TAG] })
+  if (doc.errors.length > 0) {
+    return { error: `cordis.patch.yml 解析失败，已保留原文件未修改：${doc.errors[0].message}` }
+  }
+  if (doc.contents === null) {
+    // Empty file: start an empty patch list on the same document.
+    doc.contents = doc.createNode([]) as any
+  }
+  if (!isSeq(doc.contents)) {
+    return { error: 'cordis.patch.yml 顶层必须是 YAML 数组，已保留原文件未修改' }
+  }
+  return { doc }
+}
+
+function savePatchDocument(profileDir: string, doc: PatchDocument): void {
+  const text = doc.toString({ lineWidth: 0 })
+  writeFileAtomic(getPatchFilePath(profileDir), text.endsWith('\n') ? text : `${text}\n`)
+}
+
+function patchSeqOf(doc: PatchDocument): YAMLSeq {
+  return doc.contents as YAMLSeq
+}
+
+function scalarText(node: unknown): string | undefined {
+  if (!isScalar(node)) return undefined
+  const value = (node as { value?: unknown }).value
+  return typeof value === 'string' ? value : undefined
+}
+
+/** `YAMLMap.get` unwraps scalars by default; keep the node to read its text. */
+function mapText(map: YAMLMap, key: string): string | undefined {
+  return scalarText(map.get(key, true))
+}
+
+interface PatchMapRef {
+  map: YAMLMap
+  parent: YAMLSeq
+  index: number
+}
+
+/** Depth-first walk over patch maps, including nested `insert` entries. */
+function forEachPatchMap(seq: YAMLSeq, visitor: (ref: PatchMapRef) => void): void {
+  const items = seq.items as unknown[]
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index]
+    if (!isMap(item)) continue
+    visitor({ map: item as YAMLMap, parent: seq, index })
+    const nested = (item as YAMLMap).get('insert', true)
+    if (isSeq(nested)) forEachPatchMap(nested as YAMLSeq, visitor)
+  }
+}
+
+function patchMapMatches(map: YAMLMap, targets: string[]): boolean {
+  const id = mapText(map, 'id')
+  const name = mapText(map, 'name')
+  return (id !== undefined && targets.includes(id)) || (name !== undefined && targets.includes(name))
+}
+
+/** Keys that only record the disabled switch, so the whole patch is removable. */
+function isPureDisabledEntry(map: YAMLMap): boolean {
+  const pairs = map.items as unknown[]
+  for (const pair of pairs) {
+    const key = scalarText((pair as { key?: unknown }).key)
+    if (key !== 'id' && key !== 'name' && key !== 'disabled') return false
+  }
+  return true
+}
+
+/** Move a removed entry's leading comment onto the next entry instead of dropping it. */
+function splicePatchEntry(parent: YAMLSeq, index: number, map: YAMLMap): void {
+  const commentBefore = (map as unknown as { commentBefore?: string }).commentBefore
+  parent.items.splice(index, 1)
+  if (!commentBefore) return
+  const next = (parent.items as unknown[])[index]
+  if (isMap(next)) {
+    const target = next as YAMLMap
+    const existing = (target as unknown as { commentBefore?: string }).commentBefore
+    ;(target as unknown as { commentBefore?: string }).commentBefore = existing ? `${commentBefore}\n${existing}` : commentBefore
+  }
+}
+
+export interface PatchUpdateResult {
+  ok: boolean
+  changed: boolean
+  error?: string
+}
+
+/**
+ * Persist one entry's enablement in the profile patch by editing only that
+ * entry: `disabled: true` is set (added when absent), and enabling removes a
+ * switch-only override or drops `disabled` while keeping the rest of the
+ * entry's config. Every other patch entry, comment, and `!!js` tag is left as
+ * written.
+ */
+export function setPluginEnabledInPatch(
+  profileDir: string,
+  targets: string[],
+  enable: boolean,
+): PatchUpdateResult {
+  const loaded = loadPatchDocument(profileDir)
+  if ('error' in loaded) return { ok: false, changed: false, error: loaded.error }
+  const { doc } = loaded
+  const seq = patchSeqOf(doc)
+  let changed = false
+
+  if (!enable) {
+    let matched: PatchMapRef | undefined
+    forEachPatchMap(seq, (ref) => {
+      if (!matched && patchMapMatches(ref.map, targets)) matched = ref
+    })
+    if (matched) {
+      if (matched.map.get('disabled') !== true) {
+        matched.map.set('disabled', true)
+        changed = true
+      }
+    } else {
+      doc.add({ id: targets[0], disabled: true })
+      changed = true
+    }
+  } else {
+    const removals: PatchMapRef[] = []
+    const cleared: YAMLMap[] = []
+    forEachPatchMap(seq, (ref) => {
+      if (!patchMapMatches(ref.map, targets)) return
+      if (isPureDisabledEntry(ref.map)) {
+        removals.push(ref)
+      } else if (ref.map.has('disabled')) {
+        cleared.push(ref.map)
+      }
+    })
+    const byParent = new Map<YAMLSeq, PatchMapRef[]>()
+    for (const ref of removals) {
+      const list = byParent.get(ref.parent) ?? []
+      list.push(ref)
+      byParent.set(ref.parent, list)
+    }
+    for (const [parent, refs] of byParent) {
+      refs.sort((a, b) => b.index - a.index)
+      for (const ref of refs) splicePatchEntry(parent, ref.index, ref.map)
+      changed = true
+    }
+    for (const map of cleared) {
+      map.delete('disabled')
+      changed = true
+    }
+  }
+
+  if (!changed) return { ok: true, changed: false }
+  savePatchDocument(profileDir, doc)
+  return { ok: true, changed }
+}
+
+/** Remove every patch entry that targets the given plugin (used on uninstall). */
+export function removePluginFromPatch(profileDir: string, targets: string[]): PatchUpdateResult {
+  const loaded = loadPatchDocument(profileDir)
+  if ('error' in loaded) return { ok: false, changed: false, error: loaded.error }
+  const seq = patchSeqOf(loaded.doc)
+  const removals: PatchMapRef[] = []
+  forEachPatchMap(seq, (ref) => {
+    if (patchMapMatches(ref.map, targets)) removals.push(ref)
+  })
+  if (removals.length === 0) return { ok: true, changed: false }
+  const byParent = new Map<YAMLSeq, PatchMapRef[]>()
+  for (const ref of removals) {
+    const list = byParent.get(ref.parent) ?? []
+    list.push(ref)
+    byParent.set(ref.parent, list)
+  }
+  for (const [parent, refs] of byParent) {
+    refs.sort((a, b) => b.index - a.index)
+    for (const ref of refs) splicePatchEntry(parent, ref.index, ref.map)
+  }
+  savePatchDocument(profileDir, loaded.doc)
+  return { ok: true, changed: true }
+}
+
 
 function findEntryIdInPatches(entries: PatchEntry[], targetId: string): string | null {
   for (const item of entries) {
@@ -210,7 +422,7 @@ function findEntryIdInPluginBundle(pluginDir: string, targetId: string): string 
   if (!existsSync(patchPath)) return null
   try {
     const raw = readFileSync(patchPath, 'utf-8')
-    const parsed = parseYaml(raw)
+    const parsed = parseYaml(raw, { customTags: [JS_TAG] })
     if (Array.isArray(parsed)) {
       return findEntryIdInPatches(parsed as PatchEntry[], targetId)
     }
@@ -329,6 +541,10 @@ export function scanPlugins(profileDir: string): PluginInfo[] {
       const description = pkgJson.description || existing?.description || ''
       const author = typeof pkgJson.author === 'string' ? pkgJson.author : pkgJson.author?.name
       const homepage = pkgJson.homepage
+      const enginesDsh =
+        typeof pkgJson.engines?.dsh === 'string' && pkgJson.engines.dsh.trim() !== ''
+          ? pkgJson.engines.dsh
+          : existing?.enginesDsh
 
       pluginsMap.set(pkgName, {
         id: pkgName,
@@ -340,6 +556,7 @@ export function scanPlugins(profileDir: string): PluginInfo[] {
         disabled: existing?.disabled ?? false,
         system: isSys,
         removable: !isSys,
+        ...(enginesDsh ? { enginesDsh, compatible: null } : {}),
       })
     } catch {}
   }
@@ -364,74 +581,25 @@ export function scanPlugins(profileDir: string): PluginInfo[] {
   return Array.from(pluginsMap.values()).filter((p) => !p.system)
 }
 
+/**
+ * Resolve the Loader entry id a plugin package contributes: a bundle's own
+ * `cordis.patch.yml` declares `id`/`name`, and profile patches address that id.
+ */
+export function resolveLoaderEntryId(profileDir: string, id: string): string {
+  const pluginDir = join(profileDir, 'node_modules', id)
+  if (existsSync(pluginDir)) {
+    const insideId = findEntryIdInPluginBundle(pluginDir, id)
+    if (insideId) return insideId
+  }
+  const patchId = findEntryIdInPatches(readPatchYaml(profileDir), id)
+  return patchId ?? id
+}
+
 export function togglePlugin(profileDir: string, id: string, enable: boolean): { ok: boolean; error?: string } {
   try {
-    const patches = readPatchYaml(profileDir)
-
-    let resolvedLoaderId = id
-    const pluginDir = join(profileDir, 'node_modules', id)
-    if (existsSync(pluginDir)) {
-      const insideId = findEntryIdInPluginBundle(pluginDir, id)
-      if (insideId) {
-        resolvedLoaderId = insideId
-      }
-    }
-
-    if (!enable) {
-      // 禁用插件：在 patch 中打上 disabled: true
-      let found = false
-      function markDisabled(entries: PatchEntry[]): boolean {
-        for (const item of entries) {
-          if (item.id === resolvedLoaderId || item.name === id || item.id === id) {
-            item.disabled = true
-            return true
-          }
-          if (Array.isArray(item.insert)) {
-            if (markDisabled(item.insert)) return true
-          }
-        }
-        return false
-      }
-      found = markDisabled(patches)
-      if (!found) {
-        patches.push({
-          id: resolvedLoaderId,
-          disabled: true,
-        })
-      }
-      writePatchYaml(profileDir, patches)
-    } else {
-      // 启用插件：彻底清除针对该 id 的纯禁用 patch，避免留下空 id 覆盖导致原生配置被抹除
-      function cleanEntry(list: PatchEntry[]): PatchEntry[] {
-        const result: PatchEntry[] = []
-        for (const item of list) {
-          const isTarget = item.id === resolvedLoaderId || item.id === id || item.name === id
-          if (isTarget) {
-            const extraKeys = Object.keys(item).filter(
-              (k) => k !== 'id' && k !== 'disabled' && k !== 'name'
-            )
-            // 如果仅用于记录禁用状态（没有额外配置），彻底删除该 patch 项
-            if (extraKeys.length === 0) {
-              continue
-            }
-            // 否则保留自定义配置，仅移除 disabled 标志
-            delete item.disabled
-            result.push(item)
-          } else {
-            if (Array.isArray(item.insert)) {
-              item.insert = cleanEntry(item.insert)
-            }
-            result.push(item)
-          }
-        }
-        return result
-      }
-
-      const cleaned = cleanEntry(patches)
-      writePatchYaml(profileDir, cleaned)
-    }
-
-    return { ok: true }
+    const resolvedLoaderId = resolveLoaderEntryId(profileDir, id)
+    const result = setPluginEnabledInPatch(profileDir, [resolvedLoaderId, id], enable)
+    return result.ok ? { ok: true } : { ok: false, error: result.error }
   } catch (err: any) {
     return { ok: false, error: err?.message || String(err) }
   }
@@ -525,60 +693,82 @@ export function togglePluginGroup(profileDir: string, groupName: string, enable:
   }
 }
 
+/** Drop the plugin from every saved group without touching the rest of the file. */
+export function removePluginFromGroups(profileDir: string, id: string): boolean {
+  const groupsData = readGroups(profileDir)
+  let modified = false
+  for (const groupName of Object.keys(groupsData.groups)) {
+    const list = groupsData.groups[groupName]
+    let idx = list.indexOf(id)
+    while (idx !== -1) {
+      list.splice(idx, 1)
+      modified = true
+      idx = list.indexOf(id)
+    }
+  }
+  if (modified) saveGroups(profileDir, groupsData)
+  return modified
+}
+
+/**
+ * Remove a plugin's dependency and bundle selection from the profile manifest.
+ *
+ * Every other dependency, every other `dsh.profile.bundles` entry, and every
+ * unknown field is preserved (only the two target values change); the file's
+ * own indentation and trailing-newline style are kept, and an unparseable
+ * manifest is reported instead of being overwritten. `compatibility.json` is
+ * owned by the official plugin manager and is never touched here.
+ */
+function removePluginFromProfileManifest(profileDir: string, id: string): { ok: boolean; error?: string } {
+  const pkgJsonPath = join(profileDir, 'package.json')
+  if (!existsSync(pkgJsonPath)) return { ok: true }
+  const text = readFileSync(pkgJsonPath, 'utf-8')
+  let pkg: any
+  try {
+    pkg = JSON.parse(text)
+  } catch {
+    return { ok: false, error: 'Profile 的 package.json 解析失败，为避免破坏配置未做修改' }
+  }
+  let modified = false
+  if (pkg?.dependencies && Object.prototype.hasOwnProperty.call(pkg.dependencies, id)) {
+    delete pkg.dependencies[id]
+    modified = true
+  }
+  const bundles = pkg?.dsh?.profile?.bundles
+  if (Array.isArray(bundles)) {
+    const idx = bundles.indexOf(id)
+    if (idx !== -1) {
+      bundles.splice(idx, 1)
+      modified = true
+    }
+  }
+  if (!modified) return { ok: true }
+  const indent = /^([ \t]+)"/m.exec(text)?.[1] ?? '  '
+  const trailingNewline = text.endsWith('\n') ? '\n' : ''
+  writeFileAtomic(pkgJsonPath, JSON.stringify(pkg, null, indent) + trailingNewline)
+  return { ok: true }
+}
+
+const INSTALLED_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/iu
+
 export function uninstallPlugin(profileDir: string, id: string): { ok: boolean; error?: string } {
   try {
     if (isSystemPlugin(id)) {
       return { ok: false, error: 'Cannot uninstall system protected plugin' }
     }
 
-    const pkgJsonPath = join(profileDir, 'package.json')
-    if (existsSync(pkgJsonPath)) {
-      try {
-        const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf-8'))
-        let modified = false
-        if (pkg.dependencies && pkg.dependencies[id]) {
-          delete pkg.dependencies[id]
-          modified = true
-        }
-        if (pkg.dsh?.profile?.bundles) {
-          const idx = pkg.dsh.profile.bundles.indexOf(id)
-          if (idx !== -1) {
-            pkg.dsh.profile.bundles.splice(idx, 1)
-            modified = true
-          }
-        }
-        if (modified) {
-          writeFileSync(pkgJsonPath, JSON.stringify(pkg, null, 2), 'utf-8')
-        }
-      } catch {}
+    const resolvedLoaderId = resolveLoaderEntryId(profileDir, id)
+    const patch = removePluginFromPatch(profileDir, [resolvedLoaderId, id])
+    if (!patch.ok) {
+      return { ok: false, error: patch.error }
     }
 
-    const patches = readPatchYaml(profileDir)
-    function cleanPatches(entries: PatchEntry[]): PatchEntry[] {
-      return entries.filter((item) => {
-        if (item.id === id || item.name === id) return false
-        if (Array.isArray(item.insert)) {
-          item.insert = cleanPatches(item.insert)
-        }
-        return true
-      })
+    const manifest = removePluginFromProfileManifest(profileDir, id)
+    if (!manifest.ok) {
+      return { ok: false, error: manifest.error }
     }
-    const cleaned = cleanPatches(patches)
-    writePatchYaml(profileDir, cleaned)
 
-    const groupsData = readGroups(profileDir)
-    let groupModified = false
-    for (const groupName of Object.keys(groupsData.groups)) {
-      const list = groupsData.groups[groupName]
-      const idx = list.indexOf(id)
-      if (idx !== -1) {
-        list.splice(idx, 1)
-        groupModified = true
-      }
-    }
-    if (groupModified) {
-      saveGroups(profileDir, groupsData)
-    }
+    removePluginFromGroups(profileDir, id)
 
     const targetPkgDir = join(profileDir, 'node_modules', id)
     if (existsSync(targetPkgDir)) {
@@ -587,23 +777,256 @@ export function uninstallPlugin(profileDir: string, id: string): { ok: boolean; 
       } catch {}
     }
 
-    try {
-      if (process.platform === 'win32') {
-        spawnSync('cmd.exe', ['/c', `pnpm remove ${id}`], {
-          cwd: profileDir,
-          stdio: 'ignore',
-        })
-      } else {
-        spawnSync('pnpm', ['remove', id], {
-          cwd: profileDir,
-          stdio: 'ignore',
-        })
-      }
-    } catch {}
+    // Best effort: the manifest edit above is what actually uninstalls the
+    // plugin for future boots, so a failing/absent pnpm only leaves the lockfile
+    // stale. The name is validated first because this runs through cmd.exe on
+    // Windows and must never be able to carry shell syntax.
+    if (INSTALLED_NAME.test(id)) {
+      try {
+        if (process.platform === 'win32') {
+          spawnSync('cmd.exe', ['/d', '/s', '/c', `pnpm remove ${id}`], {
+            cwd: profileDir,
+            stdio: 'ignore',
+          })
+        } else {
+          spawnSync('pnpm', ['remove', id], {
+            cwd: profileDir,
+            stdio: 'ignore',
+          })
+        }
+      } catch {}
+    }
 
     return { ok: true }
   } catch (err: any) {
     return { ok: false, error: err?.message || String(err) }
+  }
+}
+
+/* ------------------------------------------------------------------------- *
+ * Official `pluginManager` bridge (DSH 0.2.1+)
+ *
+ * DSH 0.2.1 ships a host service that owns profile plugin state (enablement,
+ * bundle selection, install/remove, compatibility exemptions). When it exists we
+ * let it perform the write first, because it also drives the live Loader
+ * lifecycle and keeps `compatibility.json` consistent. The hand-rolled profile
+ * file editor above remains the fallback for older hosts (0.2.0) and for
+ * operations the official service refuses (for example a non-bundle package).
+ * ------------------------------------------------------------------------- */
+
+/** Subset of the official `ChangeResult` we interpret; the service owns the rest. */
+export interface ChangeResultLike {
+  changed?: boolean
+  application?: 'applied' | 'restart-required' | 'overridden' | 'failed' | 'cancelled'
+  error?: { code?: string; diagnostic?: string; incompatible?: unknown[] }
+  warnings?: string[]
+  version?: string
+}
+
+export interface OfficialPluginManagerLike {
+  listPlugins?: () => Promise<any[]>
+  setPluginEnabled?: (id: string, enabled: boolean) => Promise<ChangeResultLike>
+  removeBundle?: (name: string) => Promise<ChangeResultLike>
+  listBundles?: () => Promise<any[]>
+}
+
+/** The official service, or `undefined` on hosts that do not provide it. */
+export function getOfficialPluginManager(ctx: Context): OfficialPluginManagerLike | undefined {
+  if (typeof ctx.get !== 'function') return undefined
+  let service: any
+  try {
+    service = ctx.get('pluginManager')
+  } catch {
+    return undefined
+  }
+  if (!service || typeof service !== 'object') return undefined
+  if (typeof service.setPluginEnabled !== 'function' || typeof service.listPlugins !== 'function') return undefined
+  return service as OfficialPluginManagerLike
+}
+
+function changeFailure(result?: ChangeResultLike): string {
+  const code = result?.error?.code
+  const diagnostic = result?.error?.diagnostic
+  if (code && diagnostic) return `${code}: ${diagnostic}`
+  if (code) return code
+  return result?.application ? `application=${result.application}` : 'unknown result'
+}
+
+/** Loader entry id the official manager uses for a plugin package name. */
+async function officialEntryId(service: OfficialPluginManagerLike, id: string): Promise<string | undefined> {
+  if (typeof service.listPlugins !== 'function') return undefined
+  const entries = (await service.listPlugins()) ?? []
+  const matches = entries.filter((entry) => entry && (entry.moduleName === id || entry.entryId === id))
+  const writable = matches.find((entry) => !entry.readOnlyReason)
+  return writable?.entryId
+}
+
+export interface ToggleResult {
+  ok: boolean
+  via: 'official' | 'legacy'
+  changed?: boolean
+  application?: string
+  error?: string
+  warnings?: string[]
+}
+
+/**
+ * Enable/disable one plugin: prefer the official service, fall back to editing
+ * the profile patch exactly as before when it is absent or refuses.
+ */
+export async function togglePluginPreferringOfficial(
+  ctx: Context,
+  profileDir: string,
+  id: string,
+  enable: boolean,
+): Promise<ToggleResult> {
+  const service = getOfficialPluginManager(ctx)
+  let officialProblem: string | undefined
+  if (service && typeof service.setPluginEnabled === 'function') {
+    try {
+      const entryId = await officialEntryId(service, id)
+      if (entryId) {
+        const result = await service.setPluginEnabled(entryId, enable)
+        const application = result?.application
+        if (application === 'applied' || application === 'restart-required' || application === 'overridden') {
+          const warnings = [...(result?.warnings ?? [])]
+          if (application === 'overridden') {
+            warnings.push('官方 pluginManager 报告该条目的启用状态被更高优先级的 patch 覆盖')
+          }
+          return { ok: true, via: 'official', changed: result?.changed, application, warnings: warnings.length ? warnings : undefined }
+        }
+        officialProblem = changeFailure(result)
+      }
+    } catch (err: any) {
+      officialProblem = err?.message || String(err)
+    }
+  }
+
+  const legacy = togglePlugin(profileDir, id, enable)
+  return {
+    ok: legacy.ok,
+    via: 'legacy',
+    error: legacy.ok ? undefined : legacy.error ?? officialProblem,
+    warnings: legacy.ok && officialProblem ? [`官方 pluginManager 不可用，已回退本地 patch：${officialProblem}`] : undefined,
+  }
+}
+
+export interface GroupToggleResult {
+  ok: boolean
+  count: number
+  error?: string
+  warnings?: string[]
+}
+
+export async function togglePluginGroupPreferringOfficial(
+  ctx: Context,
+  profileDir: string,
+  groupName: string,
+  enable: boolean,
+): Promise<GroupToggleResult> {
+  try {
+    const groupsData = readGroups(profileDir)
+    const members = groupsData.groups[groupName] || []
+    let count = 0
+    const warnings: string[] = []
+    for (const pluginId of members) {
+      const result = await togglePluginPreferringOfficial(ctx, profileDir, pluginId, enable)
+      if (result.ok) count++
+      else warnings.push(`${pluginId}: ${result.error ?? 'unknown error'}`)
+      if (result.warnings) warnings.push(...result.warnings)
+    }
+    return { ok: true, count, warnings: warnings.length ? warnings : undefined }
+  } catch (err: any) {
+    return { ok: false, count: 0, error: err?.message || String(err) }
+  }
+}
+
+export interface UninstallResult {
+  ok: boolean
+  via: 'official' | 'legacy'
+  error?: string
+  warnings?: string[]
+}
+
+/** Uninstall through the official service when it owns the bundle, else by hand. */
+export async function uninstallPluginPreferringOfficial(
+  ctx: Context,
+  profileDir: string,
+  id: string,
+): Promise<UninstallResult> {
+  if (isSystemPlugin(id)) {
+    return { ok: false, via: 'legacy', error: 'Cannot uninstall system protected plugin' }
+  }
+  const service = getOfficialPluginManager(ctx)
+  let officialProblem: string | undefined
+  if (service && typeof service.removeBundle === 'function') {
+    try {
+      const result = await service.removeBundle(id)
+      const application = result?.application
+      if ((application === 'applied' || application === 'restart-required') && !result?.error) {
+        // The service already removed the dependency, bundle selection, and
+        // patch; only this plugin's own group bookkeeping is ours.
+        removePluginFromGroups(profileDir, id)
+        return { ok: true, via: 'official', warnings: result?.warnings }
+      }
+      officialProblem = changeFailure(result)
+    } catch (err: any) {
+      officialProblem = err?.message || String(err)
+    }
+  }
+
+  const legacy = uninstallPlugin(profileDir, id)
+  return {
+    ok: legacy.ok,
+    via: 'legacy',
+    error: legacy.error,
+    warnings: legacy.ok && officialProblem ? [`官方 pluginManager 不可用，已回退本地清理：${officialProblem}`] : undefined,
+  }
+}
+
+/**
+ * The plugin list is polled by the UI every few seconds; bundle metadata is
+ * comparatively expensive, so one service's answer is reused briefly.
+ */
+const compatibilityCache = new WeakMap<object, { at: number; promise: Promise<Map<string, any>> }>()
+const COMPATIBILITY_TTL_MS = 60_000
+
+function bundleByName(service: OfficialPluginManagerLike): Promise<Map<string, any>> {
+  const cached = compatibilityCache.get(service as unknown as object)
+  const now = Date.now()
+  if (cached && now - cached.at < COMPATIBILITY_TTL_MS) return cached.promise
+  const promise = (async () => {
+    const bundles = (await service.listBundles?.()) ?? []
+    const byName = new Map<string, any>()
+    for (const bundle of bundles) {
+      if (bundle && typeof bundle.name === 'string') byName.set(bundle.name, bundle)
+    }
+    return byName
+  })()
+  compatibilityCache.set(service as unknown as object, { at: now, promise })
+  promise.catch(() => compatibilityCache.delete(service as unknown as object))
+  return promise
+}
+
+/**
+ * Fill `compatible` for plugins that declare `engines.dsh`, using the official
+ * manager's authoritative compatibility verdict (it knows the running DSH
+ * version and saved exemptions). Unknown when the service is absent.
+ */
+export async function annotatePluginCompatibility(ctx: Context, plugins: PluginInfo[]): Promise<void> {
+  if (!plugins.some((plugin) => plugin.enginesDsh)) return
+  const service = getOfficialPluginManager(ctx)
+  if (!service || typeof service.listBundles !== 'function') return
+  try {
+    const byName = await bundleByName(service)
+    for (const plugin of plugins) {
+      if (!plugin.enginesDsh) continue
+      const bundle = byName.get(plugin.id) ?? byName.get(plugin.name)
+      if (!bundle) continue
+      plugin.compatible = bundle.error?.code === 'incompatible-version' ? false : true
+    }
+  } catch {
+    // Compatibility is presentation only; a failing lookup leaves it unknown.
   }
 }
 
@@ -643,6 +1066,8 @@ function createApiHandler(ctx: Context) {
     try {
       if (subpath === 'plugins' || subpath === 'plugins/list') {
         const plugins = scanPlugins(profileDir)
+        // Authoritative engines.dsh verdict when the official service is present.
+        await annotatePluginCompatibility(ctx, plugins)
         const groupsData = readGroups(profileDir)
         writeJson(res, 200, {
           ok: true,
@@ -652,6 +1077,7 @@ function createApiHandler(ctx: Context) {
             plugins,
             groups: groupsData.groups,
             groupOrder: groupsData.groupOrder,
+            officialPluginManager: getOfficialPluginManager(ctx) !== undefined,
           },
         })
         return
@@ -670,7 +1096,7 @@ function createApiHandler(ctx: Context) {
           writeJson(res, 400, { ok: false, error: { message: 'Missing id or enable boolean' } })
           return
         }
-        const result = togglePlugin(profileDir, id, enable)
+        const result = await togglePluginPreferringOfficial(ctx, profileDir, id, enable)
         // Only respond once the live loader has applied the change, so the
         // client's immediate full-page reload composes the fresh plugin graph.
         const settled = result.ok ? await waitForLoaderSettled(ctx, [{ id, expectEnabled: enable }]) : true
@@ -685,7 +1111,7 @@ function createApiHandler(ctx: Context) {
           return
         }
         const groupMembers = readGroups(profileDir).groups[group] || []
-        const result = togglePluginGroup(profileDir, group, enable)
+        const result = await togglePluginGroupPreferringOfficial(ctx, profileDir, group, enable)
         const members = result.ok ? groupMembers : []
         const settled = result.ok
           ? await waitForLoaderSettled(ctx, members.map((id) => ({ id, expectEnabled: enable })))
@@ -768,7 +1194,7 @@ function createApiHandler(ctx: Context) {
           writeJson(res, 400, { ok: false, error: { message: 'Missing plugin id' } })
           return
         }
-        const result = uninstallPlugin(profileDir, id)
+        const result = await uninstallPluginPreferringOfficial(ctx, profileDir, id)
         writeJson(res, result.ok ? 200 : 500, { ok: result.ok, value: result, error: result.error })
         return
       }

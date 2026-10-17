@@ -12,6 +12,10 @@ export interface PluginInfo {
   disabled: boolean
   system: boolean
   removable: boolean
+  /** `engines.dsh` declared by the plugin package, when it declares one. */
+  enginesDsh?: string
+  /** Official-manager verdict for `engines.dsh`; `null`/absent means unknown. */
+  compatible?: boolean | null
 }
 
 export interface PluginsPayload {
@@ -20,6 +24,8 @@ export interface PluginsPayload {
   plugins: PluginInfo[]
   groups: Record<string, string[]>
   groupOrder: string[]
+  /** True when the host exposes the official DSH 0.2.1+ `pluginManager` service. */
+  officialPluginManager?: boolean
 }
 
 /**

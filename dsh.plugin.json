@@ -1,6 +1,6 @@
 {
   "id": "dsh-external/dsh-plugin-manager",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "main": "./lib/index.js",
   "description": "DSH 设置页插件管理器：分组管理、批量启停、一键卸载",
   "engines": {

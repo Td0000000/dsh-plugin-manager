@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Plugin Manager",
+    "description": "Group, batch enable/disable, and uninstall DSH plugins, with a draggable pixel-whale floating panel."
+  }
+}

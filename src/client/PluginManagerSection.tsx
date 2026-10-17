@@ -34,6 +34,7 @@ export function PluginManagerSection() {
   const [plugins, setPlugins] = useState<PluginInfo[]>([])
   const [groups, setGroups] = useState<Record<string, string[]>>({})
   const [groupOrder, setGroupOrder] = useState<string[]>([])
+  const [officialManager, setOfficialManager] = useState<boolean | undefined>(undefined)
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({})
   const [searchQuery, setSearchQuery] = useState('')
   const [operatingId, setOperatingId] = useState<string | null>(null)
@@ -100,6 +101,7 @@ export function PluginManagerSection() {
       setPlugins(data.plugins || [])
       setGroups(data.groups || {})
       setGroupOrder(data.groupOrder || Object.keys(data.groups || {}))
+      setOfficialManager(data.officialPluginManager)
 
       // Initialize all groups as expanded by default
       setExpandedGroups((prev) => {
@@ -339,6 +341,27 @@ export function PluginManagerSection() {
             <div className={styles.pluginTitleLine}>
               <span className={styles.pluginNameText}>{p.name}</span>
               {p.version && <span className={styles.pluginVersionText}>v{p.version}</span>}
+              {p.enginesDsh && (
+                <span
+                  className={styles.statusPill}
+                  style={
+                    p.compatible === false
+                      ? { color: 'var(--dsw-alias-state-error-primary, #ef4444)' }
+                      : p.compatible === true
+                        ? { color: 'var(--dsw-alias-state-business-primary, #16a34a)' }
+                        : { opacity: 0.7 }
+                  }
+                  title={
+                    p.compatible === true
+                      ? `兼容当前 DSH（engines.dsh: ${p.enginesDsh}）`
+                      : p.compatible === false
+                        ? `与当前 DSH 版本不兼容（engines.dsh: ${p.enginesDsh}）`
+                        : `插件要求 DSH ${p.enginesDsh}；当前版本兼容性未知，由官方 pluginManager 判定`
+                  }
+                >
+                  {p.compatible === false ? 'DSH 不兼容' : p.compatible === true ? 'DSH 兼容' : `需 DSH ${p.enginesDsh}`}
+                </span>
+              )}
               {p.system ? (
                 <span className={`${styles.statusPill} ${styles.statusSystem}`}>系统核心</span>
               ) : p.disabled ? (
@@ -431,7 +454,11 @@ export function PluginManagerSection() {
         <div className={styles.titleRow}>
           <p className={styles.subtitle}>
             当前 Profile: <strong>{profile}</strong> · 共 {plugins.length} 个插件 ·
-            支持自定义分组、批量开关与一键卸载
+            {officialManager === true
+              ? '已接入官方 pluginManager（启停优先走官方服务）'
+              : officialManager === false
+                ? '未检测到官方 pluginManager（使用本地 patch 通路）'
+                : '本地 patch 通路'}
           </p>
 
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
