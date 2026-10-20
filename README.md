@@ -51,25 +51,25 @@ DSH `0.2.1` 起，官方在 Host 层提供 `pluginManager` 服务与内置「插
 
 ---
 
-## 让 AI 帮我装（推荐方式）
+## 让 AI 帮我装（推荐方式 · 无需编译）
 
-如果您正在使用 AI 编程助手（例如 Pi、Claude Code、Cursor、Windsurf 或 DSH 内部的 Coding Agent），请**将本插件拉到本地**后，直接复制下方提示词发给 AI：
+本仓库根目录已附带**编译好的安装包**：[`dsh-plugin-manager-1.1.0.tgz`](./dsh-plugin-manager-1.1.0.tgz)。它不需要 `pnpm install` / `pnpm run build`，直接安装即可。
 
-```markdown
-请帮我将本地的 DSH 插件管理插件接入到当前运行的 DeepSeek Harness 中：
+**用法**：先把本仓库拉到本地，然后把下面这段提示词发给你的 AI 编程助手（Pi / Claude Code / Cursor / Windsurf / DSH 内置 Coding Agent）：
 
-1. 本地插件路径：/你的本地路径/dsh-plugin-manager（请替换为实际绝对路径）
-2. 请进入该插件目录执行 `pnpm install` 与 `pnpm run build`，确保已完成编译构建出 lib 产物；
-3. 请定位当前使用的 DSH Profile 目录（DSH 0.2.x 位于 `~/.dsh/profiles/<档案名>/`，例如 `desktop`、`web`）：
-   - 把构建产物复制到 `~/.dsh/plugins/dsh-plugin-manager`（含 `lib/`、`package.json`、`cordis.patch.yml`、`dsh.plugin.json`、`icon.svg`、`locale/`）；
-   - 在其 `package.json` 的 `dependencies` 中添加："dsh-plugin-manager": "link:C:/Users/你的用户名/.dsh/plugins/dsh-plugin-manager"；
-   - 在其 `package.json` 的 `dsh.profile.bundles` 数组**末尾**追加："dsh-plugin-manager"；
-     （该 bundle 自带的 `cordis.patch.yml` 会自动插入并启用 Loader 条目，**无需**手写 patch）
-4. 在 Profile 目录下执行 `pnpm install`，并触发 DSH 热重载或重启 DSH；
-5. 刷新浏览器页面，检查「设置 → 插件 → 插件管理」是否已出现面板，且右下角是否已显示像素吉祥物浮动小部件。
+```text
+请帮我把这个 DSH 插件装到当前 DSH profile：
+
+1. 克隆仓库到本地任意目录：git clone https://github.com/Td0000000/dsh-plugin-manager.git
+2. 用 DSH 的 plugin_manager 工具执行 install_bundle，target 传仓库根目录里 tgz 的绝对路径，
+   例如 <克隆目录>/dsh-plugin-manager-1.1.0.tgz
+   （install_bundle 会自动写入 profile 的 dependencies、加入 dsh.profile.bundles 并热重载，
+     不需要手改 package.json / cordis.patch.yml / node_modules）
+3. 看到结果里 application=applied 后刷新页面：
+   检查「设置 → 插件」里是否出现「插件管理」面板，且页面右下角出现像素吉祥物浮动小部件。
 ```
 
-> 提示：如果 DSH 已启用 HMR，第 3、4 步完成后宿主会**热重组**并立即挂载，无需重启进程。
+> 提示：tgz 就是本仓库源码编译出来的产物；要改源码时，请走下方「手动安装与接入步骤」从源码构建。
 
 ---
 
